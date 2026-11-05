@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Brew Day planner</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:720px;margin:auto;padding:1rem;background:#1b1b1b;color:#eee}
+h1{color:#f5b041}fieldset,details{border:1px solid #444;border-radius:8px;margin-bottom:1rem;padding:.5rem}
+label{display:block;margin:.4rem 0}
+input{background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;padding:.3rem}
+table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #333;padding:.4rem;text-align:left}
+tr.done{opacity:.5}tr.next{background:#3a2f12}
+button{background:#f5b041;border:0;border-radius:4px;padding:.4rem .8rem;cursor:pointer}
+.note{color:#aaa;font-size:.9rem}#status{color:#f5b041}
+</style></head><body>
+<h1>Brew Day planner</h1>
+<details id="cfg"><summary>GitHub sync settings</summary>
+<label>Owner <input id="owner" placeholder="your GitHub username"></label>
+<label>Repo <input id="repo"></label>
+<label>Token <input id="token" type="password"></label>
+<button id="savecfg">Save settings</button>
+</details>
+<p><span id="status"></span> <button id="reload">Reload</button></p>
+<fieldset><legend>Batch</legend>
+<label>Name <input id="name"></label>
+<label>Pitch time <input id="pitch" type="datetime-local"></label>
+<label>Volume (L) <input id="vol" type="number" step="0.1"></label>
+<label>OG <input id="og" type="number" step="0.001"></label>
+<label>Fermaid-O total (g) <input id="fo" type="number" step="0.1">
+ <span class="note">leave empty for an estimate</span></label>
+</fieldset>
+<p id="summary"></p>
+<h2>Schedule</h2>
+<table><thead><tr><th></th><th>When</th><th>Task</th></tr></thead><tbody id="tasks"></tbody></table>
+<h2>Gravity log</h2>
+<label>SG <input id="sg" type="number" step="0.001"> <button id="add">Add reading</button></label>
+<table><thead><tr><th>Time</th><th>SG</th><th>ABV</th></tr></thead><tbody id="log"></tbody></table>
+<p class="note">Nutrient amounts are a TOSNA rule-of-thumb estimate – verify in a TOSNA calculator.
+Dates after day 7 are planning estimates; go by gravity and taste.</p>
+<script>
+const CFG='brewday-config', PATH='data/brewday.json';
+const C=JSON.parse(localStorage.getItem(CFG)||'{"owner":"petterl","repo":"puzzle-brewing"}');
+let S={done:{},log:[]}, sha=null, timer=null;
+const $=id=>document.getElementById(id);
+const defaults={name:'Berry White clone',vol:10,og:1.107};
+const FIELDS=['name','pitch','vol','og','fo'];
+const status=t=>$('status').textContent=t;
+['owner','repo','token'].forEach(k=>$(k).value=C[k]||'');
+$('cfg').open=!C.token;
+$('savecfg').onclick=()=>{['owner','repo','token'].forEach(k=>C[k]=$(k).value.trim());
+  localStorage.setItem(CFG,JSON.stringify(C));load();};
+$('reload').onclick=()=>load();
+FIELDS.forEach(k=>$(k).oninput=()=>{S[k]=$(k).value;save();render();});
+function fill(){FIELDS.forEach(k=>$(k).value=S[k]??defaults[k]??'');}
+async function gh(method,body){
+  const r=await fetch(`https://api.github.com/repos/${C.owner}/${C.repo}/contents/${PATH}`,{method,cache:'no-store',
+    headers:{Authorization:`Bearer ${C.token}`,Accept:'application/vnd.github+json'},
+    body:body?JSON.stringify(body):undefined});
+  if(method==='GET'&&r.status===404)return null;
+  if(!r.ok)throw new Error(r.status===409?'conflict – press Reload to get the latest':'GitHub '+r.status);
+  return r.json();
+}
+const enc=s=>{let b='';new TextEncoder().encode(s).forEach(c=>b+=String.fromCharCode(c));return btoa(b);};
+const dec=s=>new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g,'')),c=>c.charCodeAt(0)));
+async function load(){
+  if(!C.token||!C.owner){fill();render();status('Add GitHub settings to sync');return;}
+  status('Loading…');
+  try{const f=await gh('GET');if(f){S=JSON.parse(dec(f.content));sha=f.sha;}
+    S.done=S.done||{};S.log=S.log||[];fill();render();status('Synced with GitHub');}
+  catch(e){status('Load failed: '+e.message);}
+}
+function save(){if(!C.token)return;clearTimeout(timer);status('Saving…');timer=setTimeout(push,1500);}
+async function push(){
+  try{const r=await gh('PUT',{message:'brewday: '+(S.name||'update'),
+      content:enc(JSON.stringify(S,null,2)),...(sha?{sha}:{})});
+    sha=r.content.sha;status('Saved to GitHub '+new Date().toLocaleTimeString('sv-SE'));}
+  catch(e){status('Save failed: '+e.message);}
+}
+const H=3600e3,D=24*H;
+const fmt=d=>d.toLocaleString('sv-SE',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+function render(){
+  const og=parseFloat($('og').value)||1.1, vol=parseFloat($('vol').value)||10;
+  const pts=(og-1)*1000, third=1+pts*2/3/1000;
+  const fo=parseFloat($('fo').value)||Math.round(vol*0.8*pts/107*10)/10;
+  const dose=Math.round(fo/4*10)/10;
+  const last=S.log.length?S.log[S.log.length-1].sg:og;
+  $('summary').textContent=`1/3 sugar break at SG ${third.toFixed(3)} · Fermaid-O ${fo} g total, ${dose} g per dose · current SG ${(+last).toFixed(3)}`;
+  const p=$('pitch').value?new Date($('pitch').value):null;
+  const t=o=>p?new Date(p.getTime()+o):null;
+  const reached=S.log.some(r=>r.sg<=third);
+  const tasks=[
+    ['pitch',t(0),'Pitch yeast, take OG, add Pektolase'],
+    ['n1',t(D),`Degas, add ${dose} g Fermaid-O`],
+    ['n2',t(2*D),`Degas, add ${dose} g Fermaid-O`],
+    ['n3',t(3*D),`Degas, add ${dose} g Fermaid-O`],
+    ['n4',t(7*D),`Add ${dose} g Fermaid-O at 1/3 break (SG ${third.toFixed(3)}) or day 7, whichever comes first`+(reached?' – break reached!':'')],
+    ['dry',t(21*D),'Check SG – dry is ~0.998, stable for 3 days'],
+    ['rack',t(21*D),'Rack onto ~2 kg frozen raspberries'],
+    ['oak',t(35*D),'Add oak chips, taste every 2–3 days (1–2 weeks)'],
+    ['stab',t(49*D),'Stabilise: potassium metabisulfite + potassium sorbate'],
+    ['sweet',t(51*D),'Back-sweeten to FG 1.020–1.028'],
+    ['bench',t(53*D),'Bench test white chocolate flavouring, then bottle']
+  ];
+  const now=Date.now();let nextSet=false;
+  $('tasks').innerHTML='';
+  tasks.forEach(([id,when,txt])=>{
+    const tr=document.createElement('tr');const done=S.done[id];
+    if(done)tr.className='done';else if(!nextSet){tr.className='next';nextSet=true;}
+    const late=when&&!done&&when<now?' ⚠':'';
+    tr.innerHTML=`<td><input type="checkbox" ${done?'checked':''}></td><td>${when?fmt(when)+late:'set pitch time'}</td><td>${txt}</td>`;
+    tr.querySelector('input').onchange=e=>{S.done[id]=e.target.checked;save();render();};
+    $('tasks').appendChild(tr);
+  });
+  $('log').innerHTML=S.log.map(r=>`<tr><td>${fmt(new Date(r.t))}</td><td>${(+r.sg).toFixed(3)}</td><td>${((og-r.sg)*131.25).toFixed(1)} %</td></tr>`).join('');
+}
+$('add').onclick=()=>{const v=parseFloat($('sg').value);if(!v)return;
+  S.log.push({t:Date.now(),sg:v});$('sg').value='';save();render();};
+load();setInterval(render,60e3);
+</script></body></html>
